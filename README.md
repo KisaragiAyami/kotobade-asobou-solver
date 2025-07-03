@@ -1,4 +1,3 @@
-
 # Ayami's Kotobade Asobou Solver
 
 ## Overview
@@ -14,13 +13,9 @@ The solver:
 
 ## Game Rules
 - Guess 4-kana words that exist in the word list
-- After each guess, you'll receive per-position feedback:
-    - **0 (Grey)**: No match
-    - **1 (↑↓)**: Same row (行) as target kana
-    - **2 (←→)**: Same column (段) as target kana
-    - **3 (Yellow)**: Kana exists elsewhere in word
-    - **4 (Green)**: Correct kana in correct position
-    - **5 (Lime circle)**: Variant exists in target (dakuten/handakuten/small kana)
+- After each guess, you'll receive per-position feedback
+- Refine your guess using the feedback
+- If your guess is correct, the game is over and you win the game
 
 ## Prerequisites
 - Python 3.6+
@@ -184,3 +179,71 @@ SOLUTION FOUND: すまない
 - **Word List**: Modify `wordlist.ts` with a list of 4-kana words
 - **Frequency Data**: Add `freq.csv` with `word,freq` columns for better sorting
 - **First Guess**: Delete `solver_cache.pkl` to recompute optimal first guess. This took ~3 hours during my first computation.
+
+---
+
+# 「言葉で遊ぼう」ソルバー
+
+## 概要
+このリポジトリは、[言葉で遊ぼう](https://taximanli.github.io/kotobade-asobou/)ゲーム向けのソルバーです。情報理論を活用し、単語を推測する際の試行回数を最小化する推測を提案します。  
+[3blue1brownのWordle解法](https://www.youtube.com/watch?v=v68zYyaEmEA)に着想を得た手法を使用しています。
+
+主な特徴:
+1. **初手推測の事前計算**: エントロピー最大化に基づく最適な初手を事前に計算
+2. **推測選択アルゴリズム**: 期待情報ゲインを最大化する推測を自動選択
+3. **候補絞り込み**: ゲームのフィードバックをもとに候補単語を動的にフィルタリング
+4. **候補の優先順位付け**: 単語の使用頻度データに基づくソート機能
+5. **パフォーマンス最適化**: 計算結果のキャッシュによる高速処理
+
+## ゲームルール
+- 4文字のひらがな単語を推測
+- 各推測後に位置ごとのフィードバックが得られる
+- フィードバックを手がかりに候補を絞り込み
+- 正解単語を入力で勝利
+
+## 動作環境
+- Python 3.6 以上
+### 必須ライブラリ
+- inflect
+
+## インストール方法
+必要なライブラリをインストール:
+```bash
+pip install inflect
+```
+
+## 使い方
+
+1. リポジトリをダウンロード
+2. ソルバーを起動:
+```bash
+python main.py
+```
+
+3. プロンプトに従って操作:
+   - 初回推測: Enterキーで推奨単語を使用、もしくは任意の単語を入力
+   - フィードバックを4桁の数字で入力 (例: `4012`)
+   - 正解が出るまで繰り返し
+
+## ファイル構成
+| ファイル名 | 説明 |
+|------------|------|
+| `main.py` | ソルバーのメイン実装 |
+| `wordlist.ts` | かな4文字単語リスト (必須) |
+| `freq.csv` | 単語使用頻度データ (任意) |
+| `solver_cache.pkl` | 初手推測キャッシュ (自動生成) |
+
+## フィードバックの見方
+| 記号 | コード | 意味 |
+|------|-------|------|
+| ⬛ | 0 | 単語に含まれない文字 |
+| ↕️ | 1 | 同じ行の仮名が同じ位置に存在 |
+| ↔️ | 2 | 同じ列の仮名が同じ位置に存在 |
+| 🟨 | 3 | 別の位置に存在する文字 |
+| 🟩 | 4 | 正しい位置の文字 |
+| 🟢 | 5 | 変種が同じ位置に存在 (濁点・半濁点・小文字) |
+
+## カスタマイズ方法
+- **単語リスト**: `wordlist.ts` を編集して使用単語を変更
+- **頻度データ**: `freq.csv` に `単語,頻度` 形式でデータ追加
+- **初手推測の再計算**: `solver_cache.pkl` を削除すると再生成 (初回計算目安: 約3時間)
