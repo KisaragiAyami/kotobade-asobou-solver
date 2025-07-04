@@ -5,6 +5,7 @@ import pickle
 import os
 import csv
 import sys
+import itertools
 from collections import defaultdict
 from functools import lru_cache
 
@@ -165,11 +166,12 @@ class EntropySolver:
         self.cache_file = cache_file
         self.candidates = self.full_list.copy()
         self.precomputed_first_guess = None
+        self.precomputed_second_guesses = None
         self.feedback_cache = {}
         self.pattern_cache = {}
         self.frequency_dict = self.load_frequency_data("freq.csv")
         
-        # 事前計算済み初手推測を読み込み
+        # 事前計算済みデータを読み込み
         self.load_cache()
     
     def load_frequency_data(self, filename):
@@ -200,16 +202,25 @@ class EntropySolver:
                 with open(self.cache_file, 'rb') as f:
                     cache_data = pickle.load(f)
                     self.precomputed_first_guess = cache_data.get('first_guess')
+                    self.precomputed_second_guesses = cache_data.get('second_guesses')
+                    
                     if self.precomputed_first_guess:
                         guess, gain = self.precomputed_first_guess
                         print(f"事前計算済み初手推測: {guess} ({gain:.4f} bits)")
+                    
+                    if self.precomputed_second_guesses:
+                        print(f"事前計算済み第2推測: {len(self.precomputed_second_guesses)}パターン読み込みました")
             except Exception as e:
                 print(f"キャッシュ読み込みエラー: {e}")
                 self.precomputed_first_guess = None
+                self.precomputed_second_guesses = None
     
     def save_cache(self):
         """将来の実行のために事前計算データを保存"""
-        cache_data = {'first_guess': self.precomputed_first_guess}
+        cache_data = {
+            'first_guess': self.precomputed_first_guess,
+            'second_guesses': self.precomputed_second_guesses
+        }
         with open(self.cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
     
@@ -266,13 +277,79 @@ class EntropySolver:
                 last_print_time = current_time
         
         self.precomputed_first_guess = (best_guess, best_gain)
-        self.save_cache()
-        
-        elapsed = time.time() - start_time
-        print(f"事前計算完了: {elapsed:.1f}秒")
+        print(f"事前計算完了: {time.time() - start_time:.1f}秒")
         print(f"最適初手推測: {best_guess} ({best_gain:.4f} bits)")
         
+        # 第2推測を事前計算
+        self.precompute_second_guesses(best_guess)
+        
         return best_guess, best_gain
+    
+    def precompute_second_guesses(self, first_guess):
+        """全てのフィードバックパターンに対して第2推測を事前計算"""
+        if self.precomputed_second_guesses is None:
+            self.precomputed_second_guesses = {}
+        
+        # 全フィードバックパターン生成 (4位置×6状態)
+        all_feedbacks = list(itertools.product([0,1,2,3,4,5], repeat=4))
+        total_patterns = len(all_feedbacks)
+        print(f"全フィードバックパターン数: 6^4 = {total_patterns}")
+        
+        # フィードバックパターンごとに回答をグループ化
+        pattern_counts = defaultdict(list)
+        for answer in self.full_list:
+            fb = get_feedback_cached(first_guess, answer)
+            pattern_counts[fb].append(answer)
+        
+        # 進捗追跡
+        computed_count = 0
+        skipped_count = 0
+        impossible_count = 0
+        
+        # 各パターンに対して最適な推測を計算
+        for idx, feedback in enumerate(all_feedbacks):
+            # 既に計算済みならスキップ
+            if feedback in self.precomputed_second_guesses:
+                skipped_count += 1
+                continue
+                
+            candidates = pattern_counts.get(feedback, [])
+            candidate_count = len(candidates)
+            
+            # 不可能なパターンの処理
+            if candidate_count == 0:
+                self.precomputed_second_guesses[feedback] = (None, 0)
+                impossible_count += 1
+                print(f"  パターン {idx+1}/{total_patterns}: {feedback} (0候補 - 不可能)")
+                self.save_cache()
+                continue
+                
+            print(f"  パターン {idx+1}/{total_patterns}: {feedback} ({candidate_count}候補)")
+            start_time_pattern = time.time()
+            
+            # 最適な推測を計算
+            best_guess, gain = self.find_best_guess(candidates)
+            elapsed_pattern = time.time() - start_time_pattern
+
+            self.precomputed_second_guesses[feedback] = (best_guess, gain)
+            computed_count += 1
+            print(f"    最適な第2推測: {best_guess} ({gain:.4f} bits) - 計算時間: {elapsed_pattern:.2f}秒")
+            
+            # 各パターン処理後にキャッシュを保存
+            self.save_cache()
+        
+        # 統計情報
+        possible_patterns = len([c for c in pattern_counts.values() if c])
+        
+        print(f"「{first_guess}」の統計:")
+        print(f"- 全パターン数: {total_patterns}")
+        print(f"- 可能パターン数: {possible_patterns}")
+        print(f"- 不可能パターン数: {impossible_count}")
+        print(f"- 事前計算パターン数: {computed_count}")
+        print(f"- スキップパターン数: {skipped_count}")
+        
+        elapsed_total = time.time() - start_time_total
+        print(f"第2推測事前計算完了: {elapsed_total:.1f}秒")
     
     def expected_information_gain(self, guess, candidates):
         """推測の期待情報ゲインを計算"""
@@ -336,7 +413,7 @@ class EntropySolver:
             # 10%ごとに進捗を表示
             if (idx + 1) % max(1, guess_count // 10) == 0:
                 elapsed = time.time() - start_time
-                print(f"    進捗: {idx+1}/{guess_count}件 ({(idx+1)/guess_count*100:.1f}%)")
+                print(f"    進捗: {idx+1}/{guess_count}件 ({(idx+1)/guess_count*100:.1f}%) - 経過時間: {elapsed:.1f}秒")
         
         elapsed = time.time() - start_time
         print(f"  {guess_count}件の評価完了: {elapsed:.2f}秒")
@@ -396,6 +473,20 @@ class EntropySolver:
             first_guess, first_gain = self.precomputed_first_guess
             print(f"事前計算済み初手推測を使用: {first_guess} ({first_gain:.4f} bits)")
         
+        # 第2推測事前計算の確認
+        if not self.precomputed_second_guesses:
+            print("事前計算済み第2推測が見つかりません")
+            self.precompute_second_guesses(first_guess)
+        else:
+            # 不足パターンを確認
+            all_feedbacks = list(itertools.product([0,1,2,3,4,5], repeat=4))
+            missing = [fb for fb in all_feedbacks if fb not in self.precomputed_second_guesses]
+            if missing:
+                print(f"事前計算済み第2推測に{len(missing)}パターン不足、再計算します...")
+                self.precompute_second_guesses(first_guess)
+            else:
+                print("事前計算済み第2推測: 全1296パターン有効")
+        
         # 初手推測
         print(f"\n=== 第1ラウンド ===")
         print(f"推奨初手推測: {first_guess}")
@@ -426,23 +517,33 @@ class EntropySolver:
             print(f"\n=== 第{round_num}ラウンド ===")
             print(f"  {candidate_count}候補が残っています")
             
-            # 最良の推測を見つける
-            start_time = time.time()
-            best_guess, gain = self.find_best_guess(self.candidates)
-            elapsed = time.time() - start_time
+            # 事前計算済み第2推測を確認
+            cached_second_guess = None
+            if user_guess == first_guess and self.precomputed_second_guesses:
+                cached_second_guess = self.precomputed_second_guesses.get(feedback_tuple, (None, 0))
+            
+            if cached_second_guess and cached_second_guess[0]:
+                best_guess, best_gain = cached_second_guess
+                print(f"事前計算済み推測を使用: {best_guess} ({best_gain:.4f} bits)")
+            else:
+                # 最良の推測を見つける
+                start_time = time.time()
+                best_guess, best_gain = self.find_best_guess(self.candidates)
+                elapsed = time.time() - start_time
+                print(f"推奨推測: {best_guess} (期待情報ゲイン: {best_gain:.4f} bits) - 計算時間: {elapsed:.2f}秒")
             
             # 評価後に候補を表示（推奨前）
             if 0 < candidate_count <= 50:
                 self.display_candidates(self.candidates)
             
-            print(f"推奨推測: {best_guess} (期待情報ゲイン: {gain:.4f} bits)")
-            user_guess = input("推測を入力（Enterで推奨を使用）: ").strip()
-            
-            if not user_guess:
+            user_input = input("推測を入力（Enterで推奨を使用）: ").strip()
+            if not user_input:
                 user_guess = best_guess
-            elif user_guess not in self.full_list:
+            elif user_input not in self.full_list:
                 print("単語リストにありません。推奨を使用します")
                 user_guess = best_guess
+            else:
+                user_guess = user_input
             
             # フィードバックを取得
             feedback_str = input("フィードバック（4桁）: ").strip()
@@ -495,8 +596,11 @@ if __name__ == "__main__":
     print("1. 上下矢印: 同じ行の仮名が同じ位置に存在")
     print("2. 左右矢印: 同じ列の仮名が同じ位置に存在")
     print("3. 黄色: 別の位置に存在する文字")
-    print("4. 緑色: 正正しい位置の文字")
+    print("4. 緑色: 正しい位置の文字")
     print("5. 黄緑丸: 変種が同じ位置に存在 (濁点・半濁点・小文字)")
+    print("-------------------------------------")
+    print("注: 変種には濁点(か→が)、半濁点(は→ぱ)、")
+    print("    小文字(つ→っ)が含まれます")
     print("-------------------------------------")
     
     solver = EntropySolver()

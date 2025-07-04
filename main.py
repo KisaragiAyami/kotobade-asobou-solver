@@ -5,12 +5,12 @@ import pickle
 import os
 import csv
 import sys
+import itertools
 from collections import defaultdict
 from functools import lru_cache
-import inflect  # For proper pluralisation
-import unicodedata  # For normalising Unicode characters
+import inflect  # For proper pluralization
 
-# Create inflection engine for pluralisation
+# Create inflection engine for pluralization
 p = inflect.engine()
 
 # Base mapping: converts kana to base form (ignoring dakuten/handakuten, small to big)
@@ -72,25 +72,25 @@ for col_id, kanas in col_groups.items():
         col_map[kana] = col_id
 
 def get_base(kana):
-    """Get base form of kana using base_map, fallback to itself if not found"""
+    """Get base form of kana using base_map, fallback to itself if not found."""
     return base_map.get(kana, kana)
 
 def get_row(kana):
-    """Get row identifier for kana, returns None for ん/ー"""
+    """Get row identifier for kana, returns None for ん/ー."""
     base = get_base(kana)
     if base in ['ん', 'ー']:
         return None
     return row_map.get(base, None)
 
 def get_col(kana):
-    """Get column identifier for kana, returns None for ん/ー"""
+    """Get column identifier for kana, returns None for ん/ー."""
     base = get_base(kana)
     if base in ['ん', 'ー']:
         return None
     return col_map.get(base, None)
 
 def is_variant(a, b):
-    """Check if a is a variant of b (same base, not identical)"""
+    """Check if a is a variant of b (same base, not identical)."""
     if a == b:
         return False
     return get_base(a) == get_base(b)
@@ -170,11 +170,12 @@ class EntropySolver:
         self.cache_file = cache_file
         self.candidates = self.full_list.copy()
         self.precomputed_first_guess = None
+        self.precomputed_second_guesses = None
         self.feedback_cache = {}
         self.pattern_cache = {}
         self.frequency_dict = self.load_frequency_data("freq.csv")
         
-        # Try to load precomputed first guess
+        # Try to load precomputed first and second guesses
         self.load_cache()
     
     def load_frequency_data(self, filename):
@@ -205,16 +206,25 @@ class EntropySolver:
                 with open(self.cache_file, 'rb') as f:
                     cache_data = pickle.load(f)
                     self.precomputed_first_guess = cache_data.get('first_guess')
+                    self.precomputed_second_guesses = cache_data.get('second_guesses')
+                    
                     if self.precomputed_first_guess:
                         guess, gain = self.precomputed_first_guess
                         print(f"Loaded precomputed first guess: {guess} ({gain:.4f} bits)")
+                    
+                    if self.precomputed_second_guesses:
+                        print(f"Loaded precomputed second guesses for {len(self.precomputed_second_guesses)} feedback patterns")
             except Exception as e:
                 print(f"Error loading cache: {e}")
                 self.precomputed_first_guess = None
+                self.precomputed_second_guesses = None
     
     def save_cache(self):
         """Save precomputed data for future runs"""
-        cache_data = {'first_guess': self.precomputed_first_guess}
+        cache_data = {
+            'first_guess': self.precomputed_first_guess,
+            'second_guesses': self.precomputed_second_guesses
+        }
         with open(self.cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
     
@@ -271,13 +281,87 @@ class EntropySolver:
                 last_print_time = current_time
         
         self.precomputed_first_guess = (best_guess, best_gain)
-        self.save_cache()
-        
-        elapsed = time.time() - start_time
-        print(f"Precomputation completed in {elapsed:.1f} seconds")
+        print(f"Precomputation completed in {time.time() - start_time:.1f} seconds")
         print(f"Optimal first guess: {best_guess} ({best_gain:.4f} bits)")
         
+        # Precompute second guesses now that we have the first guess
+        self.precompute_second_guesses(best_guess)
+        
         return best_guess, best_gain
+    
+    def precompute_second_guesses(self, first_guess):
+        """Precompute optimal second guesses for all 1296 possible feedback patterns"""
+        if self.precomputed_second_guesses is None:
+            self.precomputed_second_guesses = {}
+        
+        # Start timer for the entire precomputation
+        start_time_total = time.time()
+        
+        # Generate all possible feedback patterns (0-5 for each of 4 positions)
+        all_feedbacks = list(itertools.product([0,1,2,3,4,5], repeat=4))
+        total_patterns = len(all_feedbacks)
+        print(f"Total possible feedback patterns: 6^4 = {total_patterns}")
+        
+        # Group answers by actual feedback pattern
+        pattern_counts = defaultdict(list)
+        for answer in self.full_list:
+            fb = get_feedback_cached(first_guess, answer)
+            pattern_counts[fb].append(answer)
+        
+        # Initialize progress tracking
+        computed_count = 0
+        skipped_count = 0
+        impossible_count = 0
+        
+        # Compute best guess for each pattern
+        for idx, feedback in enumerate(all_feedbacks):
+            # Skip if already computed
+            if feedback in self.precomputed_second_guesses:
+                skipped_count += 1
+                continue
+                
+            candidates = pattern_counts.get(feedback, [])
+            candidate_count = len(candidates)
+            
+            # Handle impossible patterns
+            if candidate_count == 0:
+                self.precomputed_second_guesses[feedback] = (None, 0)
+                impossible_count += 1
+                print(f"  Pattern {idx+1}/{total_patterns}: {feedback} (0 candidates - impossible)")
+                # Save immediately after processing this pattern
+                self.save_cache()
+                continue
+                
+            print(f"  Pattern {idx+1}/{total_patterns}: {feedback} ({candidate_count} candidates)")
+            start_time_pattern = time.time()
+            
+            # Clear caches to free memory before each pattern
+            self.pattern_cache.clear()
+            self.feedback_cache.clear()
+            
+            # Compute best guess
+            best_guess, gain = self.find_best_guess(candidates)
+            elapsed_pattern = time.time() - start_time_pattern
+
+            self.precomputed_second_guesses[feedback] = (best_guess, gain)
+            computed_count += 1
+            print(f"    Best second guess: {best_guess} ({gain:.4f} bits) - computed in {elapsed_pattern:.2f} seconds")
+            
+            # Save immediately after processing this pattern
+            self.save_cache()
+        
+        # Count statistics
+        possible_patterns = len([c for c in pattern_counts.values() if c])
+        
+        print(f"Summary for '{first_guess}':")
+        print(f"- Total patterns: {total_patterns}")
+        print(f"- Possible patterns: {possible_patterns}")
+        print(f"- Impossible patterns: {impossible_count}")
+        print(f"- Precomputed: {computed_count} patterns")
+        print(f"- Skipped (already computed): {skipped_count} patterns")
+        
+        elapsed_total = time.time() - start_time_total
+        print(f"Second guess precomputation completed in {elapsed_total:.1f} seconds")
     
     def expected_information_gain(self, guess, candidates):
         """Calculate expected information gain for a guess"""
@@ -326,11 +410,10 @@ class EntropySolver:
             guess_set = candidates
         else:
             # For large candidate sets, evaluate entire dictionary
-            # but this might be slow - we'll provide progress updates
             guess_set = self.full_list
         
         guess_count = len(guess_set)
-        print(f"  Evaluating {p.no('potential guess', guess_count)}...")
+        print(f"    Evaluating {p.no('potential guess', guess_count)}...")
         
         # Evaluate all possible guesses in the guess set
         for idx, guess in enumerate(guess_set):
@@ -343,11 +426,11 @@ class EntropySolver:
             # Print progress every 10% of the way
             if (idx + 1) % max(1, guess_count // 10) == 0:
                 elapsed = time.time() - start_time
-                print(f"    Processed {p.no('guess', idx+1)} of {p.no('guess', guess_count)} "
-                      f"({(idx+1)/guess_count*100:.1f}%)")
+                print(f"      Processed {p.no('guess', idx+1)} of {p.no('guess', guess_count)} "
+                      f"({(idx+1)/guess_count*100:.1f}%) - Elapsed: {elapsed:.1f}s")
         
         elapsed = time.time() - start_time
-        print(f"  Evaluated {p.no('guess', guess_count)} in {elapsed:.2f} seconds")
+        print(f"    Evaluated {p.no('guess', guess_count)} in {elapsed:.2f} seconds")
         return best_guess, best_gain
     
     def filter_candidates(self, guess, feedback, candidates):
@@ -408,6 +491,20 @@ class EntropySolver:
             first_guess, first_gain = self.precomputed_first_guess
             print(f"Using precomputed first guess: {first_guess} ({first_gain:.4f} bits)")
         
+        # Precompute second guesses if needed
+        if not self.precomputed_second_guesses:
+            print("No precomputed second guesses found.")
+            self.precompute_second_guesses(first_guess)
+        else:
+            # Check how many patterns are missing
+            all_feedbacks = list(itertools.product([0,1,2,3,4,5], repeat=4))
+            missing = [fb for fb in all_feedbacks if fb not in self.precomputed_second_guesses]
+            if missing:
+                print(f"Found {len(missing)} missing patterns in second guess cache, resuming precomputation...")
+                self.precompute_second_guesses(first_guess)
+            else:
+                print("Second guess cache is complete for all 1296 patterns")
+        
         # First guess
         print(f"\n=== ROUND 1 ===")
         print(f"Recommended first guess: {first_guess}")
@@ -438,23 +535,33 @@ class EntropySolver:
             print(f"\n=== ROUND {round_num} ===")
             print(f"  {p.no('candidate', candidate_count)} remain{'s' if candidate_count == 1 else ''}")
             
-            # Find best guess
-            start_time = time.time()
-            best_guess, gain = self.find_best_guess(self.candidates)
-            elapsed = time.time() - start_time
+            # Check for cached second guess
+            cached_second_guess = None
+            if user_guess == first_guess and self.precomputed_second_guesses:
+                cached_second_guess = self.precomputed_second_guesses.get(feedback_tuple, (None, 0))
+            
+            if cached_second_guess and cached_second_guess[0]:
+                best_guess, best_gain = cached_second_guess
+                print(f"Using precomputed second guess: {best_guess} ({best_gain:.4f} bits)")
+            else:
+                # Find best guess normally
+                start_time = time.time()
+                best_guess, best_gain = self.find_best_guess(self.candidates)
+                elapsed = time.time() - start_time
+                print(f"Recommended guess: {best_guess} (expected gain: {best_gain:.4f} bits) - computed in {elapsed:.2f} seconds")
             
             # Show candidates AFTER evaluation but BEFORE recommendation
             if 0 < candidate_count <= 50:
                 self.display_candidates(self.candidates)
             
-            print(f"Recommended guess: {best_guess} (expected gain: {gain:.4f} bits)")
-            user_guess = input("Enter your guess (or press Enter to use recommendation): ").strip()
-            
-            if not user_guess:
+            user_input = input("Enter your guess (or press Enter to use recommendation): ").strip()
+            if not user_input:
                 user_guess = best_guess
-            elif user_guess not in self.full_list:
+            elif user_input not in self.full_list:
                 print("Word not in list, using recommendation instead")
                 user_guess = best_guess
+            else:
+                user_guess = user_input
             
             # Get feedback
             feedback_str = input("Enter feedback (4 digits): ").strip()
@@ -466,7 +573,6 @@ class EntropySolver:
             candidate_count = len(self.candidates)
             removed = prev_count - candidate_count
             
-            # Proper pluralisation for removal message
             print(f"  Removed {p.no('candidate', removed)}, {p.no('candidate', candidate_count)} remain{'s' if candidate_count == 1 else ''}")
             
             # Show all candidates when <= 50 remain
@@ -501,7 +607,7 @@ class EntropySolver:
 # Run the solver
 if __name__ == "__main__":
     print("=== 4-Kana Japanese Word Game Solver ===")
-    print("Information Theory Optimised Version")  # British spelling
+    print("Information Theory Optimized Version")
     print("-------------------------------------")
     print("Feedback Encoding:")
     print("0. Grey square    : Kana not in target")
